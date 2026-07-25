@@ -4921,30 +4921,27 @@ async fn process_channel_message_body(
     //     protocols architecturally instead of via prompt text
     // Matching lives in `zeroclaw_runtime::skills::match_skill_activation`.
     let mut skill_blocked_tools: Vec<String> = Vec::new();
-    // Fast-path gate: skip the per-message skill walk entirely unless some
-    // skill this agent can load declares auto-activation behavior. The gate
-    // is memoized per (workspace, agent) and dropped on every skills write,
-    // so agents without such skills pay no filesystem I/O here.
-    if zeroclaw_runtime::skills::agent_declares_activation_skills(
+    // Resolved from the canonical skill loader on every message. The
+    // image-turn entry below removes a tool capability, so the decision of
+    // whether any skill declares one must reflect the current on-disk state:
+    // a separately-cached verdict could report "none" for a skill installed
+    // out-of-process and leave the declared tool callable on the exact image
+    // turn it is meant to block (#8965). The loader's content-digest cache
+    // keeps the repeat cost to a directory digest rather than a re-audit.
+    let activation_candidates = zeroclaw_runtime::skills::load_activation_candidates(
         ctx.workspace_dir.as_ref(),
         ctx.prompt_config.as_ref(),
         ctx.agent_alias.as_ref(),
-    ) {
-        let candidates: Vec<_> = zeroclaw_runtime::skills::load_skills_for_agent(
-            ctx.workspace_dir.as_ref(),
-            ctx.prompt_config.as_ref(),
-            ctx.agent_alias.as_ref(),
-        )
-        .into_iter()
-        .filter(|s| s.provider.is_some() || !s.blocked_tools_with_image.is_empty())
-        .collect();
-
+    );
+    if !activation_candidates.is_empty() {
         // Image presence comes from the typed attachment envelope captured
         // before media enrichment, never from message-text matching.
         let has_image = msg_has_image_attachment;
-        if let Some(skill) =
-            zeroclaw_runtime::skills::match_skill_activation(&candidates, &msg.content, has_image)
-        {
+        if let Some(skill) = zeroclaw_runtime::skills::match_skill_activation(
+            &activation_candidates,
+            &msg.content,
+            has_image,
+        ) {
             // 1. Switch the session provider if the skill declares one.
             //    Mirrors the model-switch contract: resolve the manifest's
             //    provider ref to a configured `<type>.<alias>` profile and
@@ -17106,6 +17103,85 @@ blocked_tools_with_image = ["mock_price"]
                 "{case}"
             );
         }
+    }
+
+    /// #8965 review (freshness of the safety decision): a skill installed by
+    /// another process must be enforced on the very NEXT message — no
+    /// invalidate hook, no expiry to wait out.
+    ///
+    /// The first turn deliberately primes the skill-load cache with a
+    /// workspace that declares no activation skills, so the second turn can
+    /// only pass if the cached negative was re-derived from disk. The earlier
+    /// design memoized that negative verdict behind its own TTL, which left
+    /// `blocked_tools_with_image` unenforced for up to a minute after an
+    /// out-of-process `skills install` — the exact image turn it exists to
+    /// protect. Freshness now rides on the loader's content digest, so the
+    /// write below takes effect immediately.
+    #[tokio::test]
+    async fn out_of_band_skill_install_blocks_declared_tool_on_next_message() {
+        let workspace = tempfile::TempDir::new().unwrap();
+
+        // Turn 1: no activation skill on disk — the tool runs, and the load
+        // cache now holds a "no activation candidates" answer for this
+        // workspace.
+        let executions = Arc::new(AtomicUsize::new(0));
+        let make_ctx = || {
+            let tools: Arc<Vec<Box<dyn Tool>>> = Arc::new(vec![Box::new(CountingPriceTool {
+                executions: Arc::clone(&executions),
+            })]);
+            skill_activation_test_ctx_with_tooling(
+                Arc::new(zeroclaw_config::schema::Config::default()),
+                workspace.path().to_path_buf(),
+                HashMap::new(),
+                Arc::new(ToolCallingModelProvider),
+                tools,
+                AutonomyLevel::Full,
+                Arc::new(ApprovalManager::for_non_interactive(
+                    &zeroclaw_config::schema::RiskProfileConfig {
+                        level: zeroclaw_config::autonomy::AutonomyLevel::Full,
+                        auto_approve: vec!["mock_price".to_string()],
+                        ..Default::default()
+                    },
+                )),
+                zeroclaw_config::schema::MediaPipelineConfig::default(),
+            )
+        };
+
+        let (ctx, _channel) = make_ctx();
+        process_channel_message(
+            ctx,
+            skill_activation_message("What is the BTC price now?", vec![jpeg_attachment()]),
+            CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            1,
+            "baseline: with no activation skill declared the tool must run, \
+             which also primes the load cache with that negative answer"
+        );
+
+        // Out-of-process writer: drop the skill on disk and call NO
+        // invalidate hook (the CLI `skills install` runs in a separate
+        // process and cannot reach this process's hook).
+        write_image_toolblock_skill(workspace.path());
+
+        // Turn 2: same image turn, same workspace. The declared block must
+        // already be in force.
+        let (ctx, _channel) = make_ctx();
+        process_channel_message(
+            ctx,
+            skill_activation_message("What is the BTC price now?", vec![jpeg_attachment()]),
+            CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            1,
+            "an out-of-band skill install must block the declared tool on the \
+             next message; a further execution means a stale negative verdict \
+             was served"
+        );
     }
 
     /// #8965 live-smoke regression: a REAL Telegram photo update, parsed by

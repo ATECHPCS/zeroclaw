@@ -759,36 +759,33 @@ pub fn load_skills_for_agent(
     load_skills_for_agent_audited(workspace_dir, config, agent_alias).0
 }
 
-/// Fast-path guard for the per-message skill auto-activation scan: answers
-/// "does any skill this agent can load declare auto-activation behavior
-/// (`provider` or `blocked_tools_with_image`)?" and memoizes the answer per
-/// `(workspace dir, agent alias)`, so agents with no such skills skip the
-/// full [`load_skills_for_agent`] walk (directory reads plus content-digest
-/// hashing) on every inbound message.
+/// The skills this agent can load that declare auto-activation behavior
+/// (`provider` or `blocked_tools_with_image`), in loader order. An empty
+/// result means the per-message activation scan has nothing to consider.
 ///
-/// Freshness: the memo is dropped by [`cache::invalidate`], which the
-/// [`SkillsService`] calls on every skill write/remove, so in-band skill
-/// changes flip the gate on the next message. Writers that cannot reach this
-/// process's invalidate — the CLI `skills install` running as a separate
-/// process, or the open-skills git sync mutating the directory from a load
-/// path this gate skips — are covered by a bounded TTL on every verdict: a
-/// stale `false` (newly installed auto-activation skill) goes live within a
-/// minute without a restart, and a stale `true` (last such skill removed)
-/// stops paying the per-message skill walk within a minute. An invalidate
-/// that lands while a verdict is being computed retires that verdict via an
-/// epoch check rather than letting it overwrite fresher state. The
-/// `ZEROCLAW_SKILLS_CACHE_ENABLED` kill-switch disables the memo along with
-/// the load cache.
-pub fn agent_declares_activation_skills(
+/// This is a materialized view over [`load_skills_for_agent`], resolved on
+/// every call — deliberately **not** memoized behind a separate verdict.
+/// `blocked_tools_with_image` is a capability *restriction*, so the decision
+/// of whether to evaluate it has to reflect what is on disk right now: an
+/// independent memo with its own expiry could answer "no activation skills"
+/// for a skill that already exists, leaving the declared tool callable on the
+/// very image turn it is meant to block.
+///
+/// Freshness therefore rides on the canonical loader's content digest (see
+/// [`cache`]), which re-audits whenever the audited bytes change — including
+/// writes from another process, which no in-process invalidate hook can
+/// observe. The digest walk is the cost of that guarantee; a cache hit still
+/// skips the security audit, the Markdown/TOML parse, and shadow resolution,
+/// which is the expensive part. (#8965)
+pub fn load_activation_candidates(
     workspace_dir: &Path,
     config: &zeroclaw_config::schema::Config,
     agent_alias: &str,
-) -> bool {
-    cache::cached_activation_gate(workspace_dir, agent_alias, || {
-        load_skills_for_agent(workspace_dir, config, agent_alias)
-            .iter()
-            .any(|s| s.provider.is_some() || !s.blocked_tools_with_image.is_empty())
-    })
+) -> Vec<Skill> {
+    load_skills_for_agent(workspace_dir, config, agent_alias)
+        .into_iter()
+        .filter(|s| s.provider.is_some() || !s.blocked_tools_with_image.is_empty())
+        .collect()
 }
 
 /// Origin tag for a pre-bundle skill, mirroring [`super::service`]'s
@@ -4798,12 +4795,21 @@ version = "0.1.0"
         .unwrap();
     }
 
-    /// #8965 review: `agent_declares_activation_skills` is false for an agent
-    /// whose skills declare no auto-activation fields, and flips to true after
-    /// an auto-activation skill lands and `cache::invalidate()` runs (what
-    /// every `SkillsService` write does).
+    /// #8965 review: an out-of-process skill install must be enforced on the
+    /// very next message, with no invalidate hook and no expiry to wait out.
+    ///
+    /// This is the safety property behind removing the old activation-gate
+    /// memo: that memo answered "does this agent declare activation skills?"
+    /// from its own snapshot, so a skill written by another process (the CLI
+    /// `skills install`, a direct directory edit) could be ignored for a full
+    /// TTL — leaving a declared `blocked_tools_with_image` tool callable on
+    /// the image turn it exists to block. `load_activation_candidates`
+    /// resolves from the canonical loader, whose freshness key is a digest of
+    /// the audited bytes, so the write below lands immediately. The test
+    /// deliberately performs NO `cache::invalidate()` after writing: passing
+    /// only because of an invalidate would not prove the out-of-band case.
     #[test]
-    fn activation_gate_reflects_declared_skills_after_invalidate() {
+    fn activation_candidates_reflect_out_of_band_install_without_invalidate() {
         let install_root = TempDir::new().unwrap();
         let data_dir = TempDir::new().unwrap();
         let agent_workspace = TempDir::new().unwrap();
@@ -4817,14 +4823,15 @@ version = "0.1.0"
             agent_workspace.path().to_path_buf(),
         );
 
-        cache::invalidate();
+        // Prime the load cache so the assertion below cannot pass merely
+        // because nothing had been cached yet.
         assert!(
-            !agent_declares_activation_skills(agent_workspace.path(), &config, agent_alias),
-            "gate must be false with only a plain skill"
+            load_activation_candidates(agent_workspace.path(), &config, agent_alias).is_empty(),
+            "a plain skill declares no auto-activation behavior"
         );
 
-        // Install an auto-activation skill, then invalidate as the
-        // SkillsService write path would.
+        // Simulate the out-of-process writer: drop a skill on disk and call
+        // NO invalidate hook.
         let auto_dir = agent_workspace.path().join("skills").join("auto-skill");
         std::fs::create_dir_all(&auto_dir).unwrap();
         std::fs::write(
@@ -4838,12 +4845,15 @@ blocked_tools_with_image = ["some_tool"]
 "#,
         )
         .unwrap();
-        cache::invalidate();
 
-        assert!(
-            agent_declares_activation_skills(agent_workspace.path(), &config, agent_alias),
-            "gate must flip to true after the activation skill is installed and invalidated"
+        let candidates = load_activation_candidates(agent_workspace.path(), &config, agent_alias);
+        assert_eq!(
+            candidates.len(),
+            1,
+            "an out-of-band install must be visible on the next call, with no invalidate"
         );
+        assert_eq!(candidates[0].name, "auto-skill");
+        assert_eq!(candidates[0].blocked_tools_with_image, vec!["some_tool"]);
     }
 
     /// #7963: `load_skills_for_agent_from_config_audited` returns the loaded
