@@ -183,7 +183,7 @@ fn cached_load_in(
 /// noticed on the next load without any invalidate call. Skill-derived
 /// decisions — including [`super::load_activation_candidates`], which gates a
 /// capability restriction — therefore never serve a verdict computed against
-/// content that has since changed. (#8965)
+/// content that has since changed.
 pub fn invalidate() {
     cache().write().unwrap_or_else(|e| e.into_inner()).clear();
 }

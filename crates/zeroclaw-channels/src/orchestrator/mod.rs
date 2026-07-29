@@ -4728,7 +4728,7 @@ async fn process_channel_message_body(
     // whether any skill declares one must reflect the current on-disk state:
     // a separately-cached verdict could report "none" for a skill installed
     // out-of-process and leave the declared tool callable on the exact image
-    // turn it is meant to block (#8965). The loader's content-digest cache
+    // turn it is meant to block. The loader's content-digest cache
     // keeps the repeat cost to a directory digest rather than a re-audit.
     let activation_candidates = zeroclaw_runtime::skills::load_activation_candidates(
         ctx.workspace_dir.as_ref(),
@@ -15988,7 +15988,7 @@ BTC is currently around $65,000 based on latest tool output."#
             location: None,
             // Auto-activation is irrelevant to this test (it pins runtime
             // threading), so declare nothing: no provider switch, no
-            // triggers, no image-turn tool blocks. (#8965)
+            // triggers, no image-turn tool blocks.
             provider: None,
             triggers: vec![],
             blocked_tools_with_image: vec![],
@@ -17901,7 +17901,7 @@ blocked_tools_with_image = ["mock_price"]
         .unwrap();
     }
 
-    /// #8965 review (typed image source of truth): literal `[IMAGE:` text with
+    /// Typed image source of truth: literal `[IMAGE:` text with
     /// no attachment must NOT fire the `__image__` skill activation, so a user
     /// cannot impersonate an image turn and hijack the session provider.
     #[tokio::test]
@@ -17938,7 +17938,7 @@ blocked_tools_with_image = ["mock_price"]
         );
     }
 
-    /// #8965 review (typed image source of truth + build-before-persist,
+    /// Typed image source of truth plus build-before-persist,
     /// happy path): a real image attachment with NO text marker and the media
     /// pipeline disabled must activate the `__image__` skill, resolve the
     /// manifest's bare provider to the configured dotted ref, build it, and
@@ -17990,7 +17990,7 @@ blocked_tools_with_image = ["mock_price"]
         assert_eq!(persisted.api_key, None);
     }
 
-    /// #8965 review (build-before-persist, failure paths): unknown, ambiguous,
+    /// Build-before-persist, failure paths: unknown, ambiguous,
     /// and unbuildable manifest provider values must all leave the sender's
     /// route untouched instead of poisoning the session override. Each case
     /// seeds a PRE-EXISTING route override for the sender and asserts it
@@ -18080,7 +18080,7 @@ blocked_tools_with_image = ["mock_price"]
         }
     }
 
-    /// #8965 review (end-to-end boundary proof): on a real image turn, the
+    /// End-to-end boundary proof: on a real image turn, the
     /// tool named in `blocked_tools_with_image` must be unable to execute
     /// even under Full autonomy with the tool auto-approved (the skill block
     /// is appended AFTER the cli/Full-autonomy exclusion bypass), while the
@@ -18138,7 +18138,7 @@ blocked_tools_with_image = ["mock_price"]
         }
     }
 
-    /// #8965 review (freshness of the safety decision): a skill installed by
+    /// Freshness of the safety decision: a skill installed by
     /// another process must be enforced on the very NEXT message — no
     /// invalidate hook, no expiry to wait out.
     ///
@@ -18217,7 +18217,7 @@ blocked_tools_with_image = ["mock_price"]
         );
     }
 
-    /// #8965 live-smoke regression: a REAL Telegram photo update, parsed by
+    /// Live-smoke regression: a REAL Telegram photo update, parsed by
     /// the actual channel code (wiremock Bot API), must block the declared
     /// tool when driven through `process_channel_message`. The first live
     /// smoke failed because the hand-constructed e2e above proved the
@@ -18300,7 +18300,7 @@ blocked_tools_with_image = ["mock_price"]
         );
     }
 
-    /// #8965 review round 3: an image sent "as file" through Telegram, with
+    /// Image sent as a file: an image sent "as file" through Telegram, with
     /// the media pipeline ENABLED and a vision-capable provider, must not get
     /// a second, base64-inlined `[IMAGE:data:` marker in the outgoing prompt
     /// or in the stored conversation history. The channel now emits the same

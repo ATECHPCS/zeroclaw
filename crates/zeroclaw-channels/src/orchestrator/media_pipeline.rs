@@ -382,8 +382,7 @@ mod tests {
 
         // An image sent "as file" (extensionless, image MIME): the channel
         // now emits the same [IMAGE:<path>] marker as for photos, so the
-        // pipeline must not add a second, base64-inlined copy (#8965 review
-        // round 3).
+        // pipeline must not add a second, base64-inlined copy.
         let attachment = MediaAttachment {
             file_name: "upload".to_string(),
             data: vec![0xFF, 0xD8, 0xFF, 0xE0],

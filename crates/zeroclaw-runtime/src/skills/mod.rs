@@ -700,7 +700,7 @@ pub fn load_skills_for_agent(
 /// writes from another process, which no in-process invalidate hook can
 /// observe. The digest walk is the cost of that guarantee; a cache hit still
 /// skips the security audit, the Markdown/TOML parse, and shadow resolution,
-/// which is the expensive part. (#8965)
+/// which is the expensive part.
 pub fn load_activation_candidates(
     workspace_dir: &Path,
     config: &zeroclaw_config::schema::Config,
@@ -892,7 +892,7 @@ pub fn load_skills_from_directory(
 /// precedence ("first match wins" in activation) is deterministic across
 /// filesystems and restarts — `read_dir` iteration order is explicitly
 /// unspecified, and the winner of an overlapping trigger controls a safety
-/// restriction (#8965). Injectable input exists so the regression test can
+/// restriction. Injectable input exists so the regression test can
 /// feed an explicitly shuffled list, which a `read_dir`-based fixture cannot
 /// guarantee (a filesystem may happen to iterate lexically on its own).
 fn lexically_sorted_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
@@ -4633,7 +4633,7 @@ version = "0.1.0"
         .unwrap();
     }
 
-    /// #8965 review: an out-of-process skill install must be enforced on the
+    /// An out-of-process skill install must be enforced on the
     /// very next message, with no invalidate hook and no expiry to wait out.
     ///
     /// This is the safety property behind removing the old activation-gate

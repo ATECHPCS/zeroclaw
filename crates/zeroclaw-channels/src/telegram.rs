@@ -1787,7 +1787,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
     /// is not an attachment, workspace_dir is not configured, or the file exceeds
     /// size limits.
     /// `pub(crate)` so orchestrator regressions can drive a REAL parsed
-    /// Telegram update through `process_channel_message` (the #8965 live
+    /// Telegram update through `process_channel_message` (the live
     /// smoke failed precisely in the seam between this parser and the
     /// orchestrator's typed image gate).
     pub(crate) async fn try_parse_attachment_message(
@@ -7024,7 +7024,7 @@ mod tests {
     /// An image sent "as file" must get the `[IMAGE:]` marker even without an
     /// image extension, as long as any envelope signal (MIME here, magic bytes
     /// below) says it is an image. The marker keeps the media pipeline from
-    /// re-inlining the same image as base64 (#8965 review round 3).
+    /// re-inlining the same image as base64.
     #[test]
     fn image_document_content_uses_image_marker() {
         let local_path = std::path::Path::new("/tmp/workspace/telegram_files/upload");
