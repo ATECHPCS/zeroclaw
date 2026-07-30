@@ -3373,21 +3373,41 @@ fn strip_think_tags_inline(s: &str) -> String {
 }
 
 /// Drop the tail from the first scratchpad envelope that has opened but not
-/// closed. Callers run this only after the closed-block passes, so a
-/// surviving opener is by definition still mid-emission.
+/// closed.
 ///
 /// Streaming needs this and final delivery does not: the final response is a
 /// complete turn, whereas a draft is rendered from whatever tokens have
 /// arrived, and the closing tag can be hundreds of tokens away. Showing the
 /// open envelope in the meantime is precisely the leak this guards against.
 /// Nothing is lost — the next delta re-renders from the full accumulation.
+///
+/// A *closed* block is stepped over rather than cut at. On the paths that
+/// strip closed blocks first there is nothing left to step over, so this costs
+/// nothing there; it is what makes the function safe to run on the branch that
+/// deliberately preserves a complete `<tool_call>` example, where cutting at
+/// the first opener would delete the very thing the branch exists to keep.
 fn truncate_at_unclosed_scratchpad_open(s: &str) -> String {
-    const OPENERS: [&str; 2] = ["<tool_result", "<tool_call"];
-    let cut = OPENERS
-        .iter()
-        .filter_map(|opener| s.find(opener))
-        .min()
-        .unwrap_or(s.len());
+    const TAGS: [(&str, &str); 2] = [
+        ("<tool_result", "</tool_result>"),
+        ("<tool_call", "</tool_call>"),
+    ];
+    let mut cut = s.len();
+    for (opener, closer) in TAGS {
+        let mut from = 0;
+        while let Some(offset) = s[from..].find(opener) {
+            let open_at = from + offset;
+            match s[open_at..].find(closer) {
+                // Complete block: resume the scan after it, so a later opener
+                // of the same kind is still evaluated on its own merits.
+                Some(close_at) => from = open_at + close_at + closer.len(),
+                // Nothing closes this one, so it is still mid-emission.
+                None => {
+                    cut = cut.min(open_at);
+                    break;
+                }
+            }
+        }
+    }
     let head = &s[..cut];
     // The opening tag is itself delivered in fragments, so the tail can be a
     // strict prefix of an opener ("…\n<tool_res") that matches none of them
@@ -3397,9 +3417,8 @@ fn truncate_at_unclosed_scratchpad_open(s: &str) -> String {
     let partial = head
         .rfind('<')
         .filter(|&pos| {
-            OPENERS
-                .iter()
-                .any(|opener| opener.starts_with(&head[pos..]))
+            TAGS.iter()
+                .any(|(opener, _)| opener.starts_with(&head[pos..]))
         })
         .unwrap_or(head.len());
     head[..partial].trim_end().to_string()
@@ -3433,11 +3452,73 @@ fn sanitize_streaming_draft_text(s: &str) -> String {
     // screen that the delivered message then strips — a leak window in the
     // one direction this fix exists to close.
     if starts_with_visible_tool_call_tag_example(&cleaned) {
-        return strip_tool_result_content(&cleaned);
+        // Preserving the example does not license showing a half-emitted
+        // result envelope: `strip_tool_result_content` removes the closed
+        // ones, and truncation removes an opener that has no closer yet.
+        // Skipping truncation here would leave a raw partial payload on
+        // screen, which is the same leak this function exists to close.
+        let cleaned = strip_tool_result_content(&cleaned);
+        return truncate_at_unclosed_scratchpad_open(&cleaned);
     }
     let cleaned = strip_tool_call_tags(&cleaned);
     let cleaned = strip_tool_result_content(&cleaned);
     truncate_at_unclosed_scratchpad_open(&cleaned)
+}
+
+/// Pump draft deltas to the channel transport, sanitizing every partial on the
+/// way out.
+///
+/// Extracted from the streaming spawn so the boundary can be exercised through
+/// the values actually handed to `update_draft` and `update_draft_progress`. A
+/// test that calls [`sanitize_streaming_draft_text`] directly proves only that
+/// the helper is correct, and would stay green if this wiring were removed;
+/// the leak this guards against is a transport call carrying raw text, so that
+/// is what the regression needs to observe.
+///
+/// Status deltas are sanitized per delta because they replace the progress
+/// line outright, whereas text deltas are accumulated first: the sanitizer
+/// needs the whole partial to tell a closed envelope from one still arriving.
+async fn run_draft_updater(
+    channel: Arc<dyn Channel>,
+    reply_target: String,
+    draft_id: String,
+    mut rx: tokio::sync::mpsc::Receiver<zeroclaw_runtime::agent::loop_::DraftEvent>,
+) {
+    use zeroclaw_runtime::agent::loop_::StreamDelta;
+    let mut accumulated = String::new();
+    while let Some(event) = rx.recv().await {
+        match event {
+            StreamDelta::Status(text) => {
+                let visible = sanitize_streaming_draft_text(&text);
+                if let Err(e) = channel
+                    .update_draft_progress(&reply_target, &draft_id, &visible)
+                    .await
+                {
+                    ::zeroclaw_log::record!(
+                        DEBUG,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                        "Draft progress update failed"
+                    );
+                }
+            }
+            StreamDelta::Text(text) => {
+                accumulated.push_str(&text);
+                let visible = sanitize_streaming_draft_text(&accumulated);
+                if let Err(e) = channel
+                    .update_draft(&reply_target, &draft_id, &visible)
+                    .await
+                {
+                    ::zeroclaw_log::record!(
+                        DEBUG,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                        "Draft update failed"
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn starts_with_visible_tool_call_tag_example(response: &str) -> bool {
@@ -5223,7 +5304,7 @@ async fn process_channel_message_body(
     // Spawn the appropriate handler for the delta channel.
     let draft_updater = if use_draft_streaming {
         // Partial: accumulate text and edit a single draft message.
-        if let (Some(mut rx), Some(draft_id_ref), Some(channel_ref)) = (
+        if let (Some(rx), Some(draft_id_ref), Some(channel_ref)) = (
             delta_rx,
             draft_message_id.as_deref(),
             target_channel.as_ref(),
@@ -5232,47 +5313,7 @@ async fn process_channel_message_body(
             let reply_target = msg.reply_target.clone();
             let draft_id = draft_id_ref.to_string();
             Some(zeroclaw_spawn::spawn!(async move {
-                use zeroclaw_runtime::agent::loop_::StreamDelta;
-                let mut accumulated = String::new();
-                while let Some(event) = rx.recv().await {
-                    match event {
-                        StreamDelta::Status(text) => {
-                            let visible = sanitize_streaming_draft_text(&text);
-                            if let Err(e) = channel
-                                .update_draft_progress(&reply_target, &draft_id, &visible)
-                                .await
-                            {
-                                ::zeroclaw_log::record!(
-                                    DEBUG,
-                                    ::zeroclaw_log::Event::new(
-                                        module_path!(),
-                                        ::zeroclaw_log::Action::Note
-                                    )
-                                    .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                                    "Draft progress update failed"
-                                );
-                            }
-                        }
-                        StreamDelta::Text(text) => {
-                            accumulated.push_str(&text);
-                            let visible = sanitize_streaming_draft_text(&accumulated);
-                            if let Err(e) = channel
-                                .update_draft(&reply_target, &draft_id, &visible)
-                                .await
-                            {
-                                ::zeroclaw_log::record!(
-                                    DEBUG,
-                                    ::zeroclaw_log::Event::new(
-                                        module_path!(),
-                                        ::zeroclaw_log::Action::Note
-                                    )
-                                    .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                                    "Draft update failed"
-                                );
-                            }
-                        }
-                    }
-                }
+                run_draft_updater(channel, reply_target, draft_id, rx).await;
             }))
         } else {
             None
@@ -13670,6 +13711,11 @@ api_key = "anthropic-key"
         sent_messages: tokio::sync::Mutex<Vec<String>>,
         draft_messages: tokio::sync::Mutex<Vec<String>>,
         finalized_messages: tokio::sync::Mutex<Vec<String>>,
+        /// Text handed to `update_draft` / `update_draft_progress`, in order,
+        /// so a test can assert on what the transport actually received
+        /// rather than on a sanitizer it called itself.
+        draft_updates: tokio::sync::Mutex<Vec<String>>,
+        progress_updates: tokio::sync::Mutex<Vec<String>>,
     }
 
     impl DraftRecordingChannel {
@@ -13680,6 +13726,8 @@ api_key = "anthropic-key"
                 sent_messages: tokio::sync::Mutex::new(Vec::new()),
                 draft_messages: tokio::sync::Mutex::new(Vec::new()),
                 finalized_messages: tokio::sync::Mutex::new(Vec::new()),
+                draft_updates: tokio::sync::Mutex::new(Vec::new()),
+                progress_updates: tokio::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -13905,6 +13953,26 @@ api_key = "anthropic-key"
 
         fn supports_draft_updates(&self) -> bool {
             true
+        }
+
+        async fn update_draft(
+            &self,
+            _recipient: &str,
+            _message_id: &str,
+            text: &str,
+        ) -> anyhow::Result<()> {
+            self.draft_updates.lock().await.push(text.to_string());
+            Ok(())
+        }
+
+        async fn update_draft_progress(
+            &self,
+            _recipient: &str,
+            _message_id: &str,
+            text: &str,
+        ) -> anyhow::Result<()> {
+            self.progress_updates.lock().await.push(text.to_string());
+            Ok(())
         }
 
         async fn send_draft(&self, message: &SendMessage) -> anyhow::Result<Option<String>> {
@@ -27327,6 +27395,111 @@ Done."#;
         assert_eq!(
             frames.last().unwrap(),
             "Checking the price now.\n\nBTC is $64,000."
+        );
+    }
+
+    /// The preserved-example branch and a half-emitted result envelope in the
+    /// same stream. Preserving a complete `<tool_call>` documentation block
+    /// must not buy the model a window in which a partial `<tool_result>`
+    /// payload is visible, so this replays the accumulation frame by frame
+    /// rather than sanitizing the finished string: the leak exists only while
+    /// the closing tag has not arrived, which a single-string test cannot see.
+    #[test]
+    fn streaming_draft_preserved_example_never_shows_a_partial_result_tail() {
+        let deltas = [
+            "<tool_call>{\"name\":\"shell\"}",
+            "</tool_call>\nThis is an example, not an invocation.",
+            "\n<tool_result>{\"secret\":1",
+            "}</tool_result>\nDone.",
+        ];
+        let mut accumulated = String::new();
+        let mut frames = Vec::new();
+        for delta in deltas {
+            accumulated.push_str(delta);
+            frames.push(sanitize_streaming_draft_text(&accumulated));
+        }
+
+        for (i, frame) in frames.iter().enumerate() {
+            assert!(
+                !frame.contains("secret") && !frame.contains("<tool_result"),
+                "frame {i} leaked a result envelope: {frame:?}"
+            );
+        }
+
+        // Once the example is complete it must stay visible, including across
+        // the frames where the result envelope is still arriving.
+        for (i, frame) in frames.iter().enumerate().skip(1) {
+            assert!(
+                frame.contains("This is an example, not an invocation."),
+                "frame {i} dropped the preserved example: {frame:?}"
+            );
+            assert!(
+                frame.contains("<tool_call>"),
+                "frame {i} dropped the preserved tool_call tags: {frame:?}"
+            );
+        }
+
+        assert!(
+            frames.last().unwrap().contains("Done."),
+            "the closing prose must survive: {:?}",
+            frames.last().unwrap()
+        );
+    }
+
+    /// Production-boundary proof for draft sanitization. Drives
+    /// [`run_draft_updater`], the code the streaming spawn actually runs, and
+    /// asserts on the strings handed to `update_draft` and
+    /// `update_draft_progress`. Unlike the per-frame tests above, this one
+    /// fails if the sanitizer call is ever dropped from the wiring.
+    #[tokio::test]
+    async fn draft_updater_never_hands_scratchpad_to_the_transport() {
+        let channel_impl = Arc::new(DraftRecordingChannel::new(false, false));
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+        // Queue every delta up front, then close the sender and drain inline.
+        // The capacity exceeds the number of deltas, so nothing blocks and the
+        // updater needs no concurrent task: it returns once the channel is
+        // closed and empty.
+        let (tx, rx) = tokio::sync::mpsc::channel::<zeroclaw_runtime::agent::loop_::DraftEvent>(32);
+
+        use zeroclaw_runtime::agent::loop_::StreamDelta;
+        for delta in [
+            "Looking that up",
+            " now.\n<tool_res",
+            "ult name=\"price\">",
+            "{\"btc\": 64000}",
+            "</tool_result>\n",
+            "BTC is $64,000.",
+        ] {
+            tx.send(StreamDelta::Text(delta.to_string())).await.unwrap();
+        }
+        tx.send(StreamDelta::Status(
+            "<think>deciding</think>Working on it.".to_string(),
+        ))
+        .await
+        .unwrap();
+        drop(tx);
+
+        run_draft_updater(channel, "chat-1".to_string(), "draft-1".to_string(), rx).await;
+
+        let drafts = channel_impl.draft_updates.lock().await;
+        assert!(!drafts.is_empty(), "the transport must have been called");
+        for (i, text) in drafts.iter().enumerate() {
+            assert!(
+                !text.contains("<tool_res") && !text.contains("btc"),
+                "draft update {i} carried scratchpad to the transport: {text:?}"
+            );
+        }
+        assert_eq!(
+            drafts.last().unwrap(),
+            "Looking that up now.\n\nBTC is $64,000."
+        );
+        drop(drafts);
+
+        let progress = channel_impl.progress_updates.lock().await;
+        assert_eq!(
+            progress.as_slice(),
+            ["Working on it.".to_string()],
+            "status text must reach the transport already stripped of reasoning"
         );
     }
 
