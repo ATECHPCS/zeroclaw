@@ -3379,8 +3379,8 @@ fn strip_think_tags_inline(s: &str) -> String {
 /// Streaming needs this and final delivery does not: the final response is a
 /// complete turn, whereas a draft is rendered from whatever tokens have
 /// arrived, and the closing tag can be hundreds of tokens away. Showing the
-/// open envelope in the meantime is precisely the leak (#8964). Nothing is
-/// lost — the next delta re-renders from the full accumulation.
+/// open envelope in the meantime is precisely the leak this guards against.
+/// Nothing is lost — the next delta re-renders from the full accumulation.
 fn truncate_at_unclosed_scratchpad_open(s: &str) -> String {
     const OPENERS: [&str; 2] = ["<tool_result", "<tool_call"];
     let cut = OPENERS
@@ -3414,7 +3414,7 @@ fn truncate_at_unclosed_scratchpad_open(s: &str) -> String {
 /// [`sanitize_channel_response_for_format_with_leak_detection`], but drafts
 /// never reach it: `update_draft` posts straight to the channel transport, so
 /// a leaked envelope stays on screen until the final edit replaces it, and
-/// remains visible indefinitely if the turn fails first (#8964).
+/// remains visible indefinitely if the turn fails first.
 ///
 /// This is the assistant-output boundary for partial text, and it keeps the
 /// final sanitizer's preservation contract rather than a looser one: an
@@ -27215,7 +27215,7 @@ Done."#;
         );
     }
 
-    // ── Tests for #8964: streaming draft scratchpad sanitization ──────────
+    // ── Streaming draft scratchpad sanitization ───────────────────────────
     //
     // Drafts bypass `sanitize_channel_response_for_format_with_leak_detection`
     // entirely (`update_draft` posts straight to the transport), so these pin
@@ -27239,8 +27239,8 @@ Done."#;
         );
     }
 
-    /// Reviewer's false-positive case: a response that IS protocol
-    /// documentation must survive the draft path byte-for-byte, exactly as
+    /// False-positive guard: a response that IS protocol documentation must
+    /// survive the draft path byte-for-byte, exactly as
     /// `sanitize_channel_response_preserves_tool_call_tag_example` pins it for
     /// final delivery.
     #[test]
