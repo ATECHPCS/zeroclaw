@@ -57,7 +57,7 @@ impl<'a> MediaPipeline<'a> {
                     // base64-inlined marker here would send the same image to
                     // the provider twice and persist megabytes of base64 into
                     // session history (the current turn is stored verbatim;
-                    // only older turns get inline payloads collapsed, #3460).
+                    // only older turns get inline payloads collapsed).
                     if text_already_references_image(original_text, &attachment.file_name) {
                         continue;
                     }

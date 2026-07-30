@@ -4750,7 +4750,7 @@ async fn process_channel_message_body(
             //    construct the provider FIRST; persist the route only after
             //    a successful build, so an unknown, ambiguous, or
             //    unbuildable manifest value leaves the sender's existing
-            //    route untouched (#6173).
+            //    route untouched.
             if let Some(ref provider_name) = skill.provider {
                 match resolve_provider_ref_for_runtime_switch(
                     runtime_defaults.config.as_ref(),

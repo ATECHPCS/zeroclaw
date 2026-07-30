@@ -715,7 +715,7 @@ pub fn load_activation_candidates(
 /// Origin tag for a pre-bundle skill, mirroring [`super::service`]'s
 /// `derive_origin` discriminators minus the bundle-dir match (a pre-bundle
 /// skill is never bundle-origin). Used to seed the dedup winner map so the
-/// shadow record can name the winner's source. (#7963)
+/// shadow record can name the winner's source.
 ///
 /// This is a best-effort, display-only attribution for the shadow badge: the
 /// tag-based heuristic can misclassify a workspace skill whose `tags` happen to
@@ -4084,10 +4084,11 @@ triggers = ["__image__"]
         );
     }
 
-    /// Positive control covering the new field × strictness intersection:
-    /// after the rebase onto master (which added `prompts: Vec<String>`
-    /// to `SkillMeta` per #5972), the field must continue to parse cleanly
-    /// under `#[serde(deny_unknown_fields)]`.
+    /// Positive control for the `SkillMeta` field set × strictness
+    /// intersection: because the `[skill]` block is parsed under
+    /// `#[serde(deny_unknown_fields)]`, every declared field must stay
+    /// explicitly accepted. `prompts` is the newest such field, so it is the
+    /// one most likely to regress into an unknown-field parse error.
     #[test]
     fn accepts_prompts_in_skill_block_with_strictness() {
         let toml_str = r#"
@@ -4694,9 +4695,10 @@ blocked_tools_with_image = ["some_tool"]
         assert_eq!(candidates[0].blocked_tools_with_image, vec!["some_tool"]);
     }
 
-    /// #7963: `load_skills_for_agent_from_config_audited` returns the loaded
-    /// skills *and* the audit-dropped candidates, so the dashboard can surface
-    /// the latter. One clean + one parse-broken workspace skill → 1 + 1.
+    /// `load_skills_for_agent_from_config_audited` returns the loaded skills
+    /// *and* the audit-dropped candidates, so a caller can surface why a skill
+    /// is missing instead of silently dropping it. One clean + one
+    /// parse-broken workspace skill → 1 loaded + 1 dropped.
     #[test]
     fn load_skills_for_agent_from_config_audited_returns_dropped() {
         let install_root = TempDir::new().unwrap();

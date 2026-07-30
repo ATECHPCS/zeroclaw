@@ -7042,7 +7042,8 @@ mod tests {
         assert_eq!(content, "[IMAGE:/tmp/workspace/telegram_files/upload]");
     }
 
-    /// Markdown files must never produce `[IMAGE:]` markers (issue #1274).
+    /// A `.md` upload is text, so no envelope signal ever classifies it as an
+    /// image and it must never produce an `[IMAGE:]` marker.
     #[test]
     fn markdown_file_never_produces_image_marker() {
         let local_path = std::path::Path::new("/tmp/workspace/telegram_files/notes.md");
