@@ -4427,6 +4427,9 @@ mod tests {
             prompts: vec![],
             slash_options: Vec::new(),
             location: None,
+            provider: None,
+            triggers: Vec::new(),
+            blocked_tools_with_image: Vec::new(),
         }
     }
 

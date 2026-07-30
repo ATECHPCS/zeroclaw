@@ -482,6 +482,9 @@ mod tests {
             prompts: vec!["Run smoke tests before deploy.".into()],
             slash_options: Vec::new(),
             location: None,
+            provider: None,
+            triggers: vec![],
+            blocked_tools_with_image: vec![],
         }];
 
         let ctx = PromptContext {
@@ -531,6 +534,9 @@ mod tests {
             prompts: vec!["Run smoke tests before deploy.".into()],
             slash_options: Vec::new(),
             location: Some(Path::new("/tmp/workspace/skills/deploy/SKILL.md").to_path_buf()),
+            provider: None,
+            triggers: vec![],
+            blocked_tools_with_image: vec![],
         }];
 
         let ctx = PromptContext {
@@ -613,6 +619,9 @@ mod tests {
             prompts: vec!["Use <tool_call> and & keep output \"safe\"".into()],
             slash_options: Vec::new(),
             location: None,
+            provider: None,
+            triggers: vec![],
+            blocked_tools_with_image: vec![],
         }];
         let ctx = PromptContext {
             workspace_dir: Path::new("/tmp/workspace"),
